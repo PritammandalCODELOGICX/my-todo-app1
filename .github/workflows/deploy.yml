@@ -1,0 +1,134 @@
+name: Deploy Todo App
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+
+  # ─────────────────────────────────────────────
+  # JOB 1 — Test backend (every PR and push)
+  # ─────────────────────────────────────────────
+  test:
+    name: Test Backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install & test
+        working-directory: backend
+        run: |
+          npm ci
+          npm test -- --passWithNoTests
+
+  # ─────────────────────────────────────────────
+  # JOB 2 — Deploy (only on push to main)
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── AWS credentials ───────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      # ── STEP 1: Push frontend to S3 ──────────
+      - name: Upload frontend to S3
+        run: |
+          aws s3 sync . s3://${{ secrets.S3_BUCKET_NAME }}/ \
+            --delete \
+            --exclude ".git/*" \
+            --exclude ".github/*" \
+            --exclude "backend/*" \
+            --exclude "nginx/*" \
+            --exclude "scripts/*" \
+            --exclude "docker-compose.yml" \
+            --exclude ".env*" \
+            --exclude "node_modules/*" \
+            --exclude "README.md" \
+            --cache-control "no-cache,no-store,must-revalidate"
+
+      # ── STEP 2: Clear CloudFront cache ───────
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+
+      # ── STEP 3: Deploy backend to EC2 ────────
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Copy files to EC2
+        run: |
+          rsync -avz --delete \
+            --exclude 'node_modules' \
+            --exclude '.env' \
+            backend/ ubuntu@${{ secrets.EC2_HOST }}:/app/backend/
+
+          rsync -avz \
+            docker-compose.yml \
+            ubuntu@${{ secrets.EC2_HOST }}:/app/
+
+          rsync -avz \
+            nginx/nginx.conf \
+            ubuntu@${{ secrets.EC2_HOST }}:/app/nginx/nginx.conf
+
+      - name: Start containers on EC2
+        run: |
+          ssh ubuntu@${{ secrets.EC2_HOST }} bash << EOF
+            set -e
+            cd /app
+
+            cat > .env << ENVEOF
+          NODE_ENV=production
+          PORT=3000
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=3306
+          DB_USER=todouser
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          DB_NAME=tododb
+          FRONTEND_URL=https://${{ secrets.CLOUDFRONT_DOMAIN }}
+          ENVEOF
+
+            docker compose up -d --build --remove-orphans
+            docker image prune -f
+
+            echo "Waiting for API to be ready..."
+            for i in \$(seq 1 6); do
+              curl -sf http://localhost:3000/api/health && echo " API is up!" && break
+              echo "Retry \$i / 6 — waiting 5s..."
+              sleep 5
+            done
+          EOF
+
+      - name: Deployment summary
+        run: |
+          echo "====================================="
+          echo "Frontend : https://${{ secrets.CLOUDFRONT_DOMAIN }}"
+          echo "API health: http://${{ secrets.EC2_HOST }}/api/health"
+          echo "====================================="
