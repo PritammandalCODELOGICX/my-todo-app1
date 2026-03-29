@@ -23,13 +23,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
 
       - name: Install & test
         working-directory: backend
         run: |
-          npm ci
+          npm install
           npm test -- --passWithNoTests
 
   # ─────────────────────────────────────────────
@@ -52,30 +50,38 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
-      # ── STEP 1: Push frontend to S3 ──────────
-      - name: Upload frontend to S3
+      # ── STEP 1: Build frontend with webpack ──
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build frontend
+        run: npm run build
+
+      # ── STEP 2: Upload dist/ to S3 ───────────
+      - name: Upload index.html to S3 (no cache)
         run: |
-          aws s3 sync . s3://${{ secrets.S3_BUCKET_NAME }}/ \
-            --delete \
-            --exclude ".git/*" \
-            --exclude ".github/*" \
-            --exclude "backend/*" \
-            --exclude "nginx/*" \
-            --exclude "scripts/*" \
-            --exclude "docker-compose.yml" \
-            --exclude ".env*" \
-            --exclude "node_modules/*" \
-            --exclude "README.md" \
+          aws s3 cp dist/index.html s3://${{ secrets.S3_BUCKET_NAME }}/index.html \
             --cache-control "no-cache,no-store,must-revalidate"
 
-      # ── STEP 2: Clear CloudFront cache ───────
+      - name: Upload JS and CSS to S3 (long cache)
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_NAME }}/ \
+            --delete \
+            --exclude "index.html" \
+            --cache-control "public,max-age=31536000,immutable"
+
+      # ── STEP 3: Clear CloudFront cache ───────
       - name: Invalidate CloudFront
         run: |
           aws cloudfront create-invalidation \
             --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
             --paths "/*"
 
-      # ── STEP 3: Deploy backend to EC2 ────────
+      # ── STEP 4: Deploy backend to EC2 ────────
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
@@ -120,8 +126,8 @@ jobs:
 
             echo "Waiting for API to be ready..."
             for i in \$(seq 1 6); do
-              curl -sf http://localhost:3000/api/health && echo " API is up!" && break
-              echo "Retry \$i / 6 — waiting 5s..."
+              curl -sf http://localhost:3000/api/health && echo "API is up!" && break
+              echo "Retry \$i / 6 - waiting 5s..."
               sleep 5
             done
           EOF
