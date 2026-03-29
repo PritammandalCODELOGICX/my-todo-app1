@@ -91,7 +91,7 @@ jobs:
 
       - name: Create app directories on EC2
         run: |
-          ssh ubuntu@${{ secrets.EC2_HOST }} "mkdir -p /app/backend /app/nginx"
+          ssh ubuntu@${{ secrets.EC2_HOST }} "sudo mkdir -p /app/backend /app/nginx"
 
       - name: Copy files to EC2
         run: |
