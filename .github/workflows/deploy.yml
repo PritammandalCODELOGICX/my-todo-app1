@@ -89,6 +89,10 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
+      - name: Create app directories on EC2
+        run: |
+          ssh ubuntu@${{ secrets.EC2_HOST }} "mkdir -p /app/backend /app/nginx"
+
       - name: Copy files to EC2
         run: |
           rsync -avz --delete \
